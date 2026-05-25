@@ -39,13 +39,18 @@ jobs:
           go-version-file: go.mod
 
       - name: Attest gh CLI build with cilock
-        uses: aflock-ai/cilock-action@v1.0.5-rc6
+        uses: aflock-ai/cilock-action@v1.0.5-rc7
         with:
           step: gh-cli-build
-          # gh has a Makefile; `go build ./...` of the whole tree is
-          # what we want to attest. Real-world multi-package build,
+          # gh build into the workspace so the default product scope
+          # (workingDir/**) captures it. Real-world multi-package build,
           # uses /opt/hostedtoolcache/go, hits dependency cache.
-          command: go build -o /tmp/gh ./cmd/gh
+          command: go build -o bin/gh ./cmd/gh
+          # Explicit products list — just the gh binary. Without this
+          # the default would still match (it's under workingDir) but
+          # being explicit documents intent.
+          products: |
+            bin/gh
           trace: 'true'
           outfile: /tmp/gh-build-attestation.json
           enable-archivista: 'false'
@@ -71,11 +76,17 @@ jobs:
                 outliers: .summary.outliers,
                 diagnostics: .summary.diagnostics
               }' /tmp/payload.json
-          echo "=== first 3 product digests ==="
-          jq '[.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {}] | first | to_entries | .[:3]' /tmp/payload.json
-          # Verify the gh binary product is in there
-          echo "=== /tmp/gh as product? ==="
-          jq -r '.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {} | keys[]' /tmp/payload.json | grep -E "^/tmp/gh$" || echo "(not surfaced as product — material-only)"
+          echo "=== product count + all products ==="
+          PRODS=$(jq -r '[.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {}] | first | length' /tmp/payload.json)
+          echo "products: $PRODS"
+          jq '[.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {}] | first | keys' /tmp/payload.json
+          # Assertion: with explicit products: bin/gh, expect ~1.
+          # Allow some slack (siblings on disk) but flag if 9000+.
+          if [ "${PRODS:-0}" -gt 100 ]; then
+            echo "::error::product over-classification: $PRODS — expected single-digit. The product attestor classified too many files as products; the include-glob isn't filtering correctly."
+            exit 1
+          fi
+          echo "✓ product classification healthy ($PRODS products)"
 
       - name: Upload attestation
         if: always()
