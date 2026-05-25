@@ -39,7 +39,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Attest gh CLI build with cilock
-        uses: aflock-ai/cilock-action@v1.0.5-rc8
+        uses: aflock-ai/cilock-action@v1.0.5-rc9
         with:
           step: gh-cli-build
           # gh build into the workspace so the default product scope
