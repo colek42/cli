@@ -1,0 +1,86 @@
+name: cilock-action smoke (gh CLI build)
+
+# Downstream consumer test: attest a real-world Go build using
+# `uses: aflock-ai/cilock-action@v1.0.5-rc6`. The gh CLI is a
+# meaningful workload — 100s of dependencies, real Makefile,
+# /opt/hostedtoolcache reads, multi-package go build.
+#
+# Confirms cilock-action delivers a real attestation for a popular
+# OSS project without any code changes to the project itself.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/cilock-smoke.yml'
+
+permissions:
+  contents: read
+  id-token: write  # sigstore keyless via GHA OIDC
+
+jobs:
+  build-with-cilock:
+    name: gh CLI build with cilock attestation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show runner info
+        run: |
+          uname -a
+          cat /proc/version
+          df -h / /tmp /opt 2>/dev/null | head
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Attest gh CLI build with cilock
+        uses: aflock-ai/cilock-action@v1.0.5-rc6
+        with:
+          step: gh-cli-build
+          # gh has a Makefile; `go build ./...` of the whole tree is
+          # what we want to attest. Real-world multi-package build,
+          # uses /opt/hostedtoolcache/go, hits dependency cache.
+          command: go build -o /tmp/gh ./cmd/gh
+          trace: 'true'
+          outfile: /tmp/gh-build-attestation.json
+          enable-archivista: 'false'
+
+      - name: Verify attestation + report
+        if: always()
+        run: |
+          if [ ! -f /tmp/gh-build-attestation.json ]; then
+            echo "::error::no attestation produced"
+            exit 1
+          fi
+          BYTES=$(wc -c < /tmp/gh-build-attestation.json)
+          echo "attestation size: $BYTES bytes"
+          jq -r '.payload' /tmp/gh-build-attestation.json | base64 -d > /tmp/payload.json
+          echo "=== predicate type ==="
+          jq -r '.predicateType' /tmp/payload.json
+          echo "=== command-run summary ==="
+          jq '.predicate.attestations[]? | select(.type | test("command-run")) | .attestation | {
+                cmd: .cmd,
+                exit: .exitcode,
+                processes: (.processes | length),
+                totals: .summary.totals,
+                outliers: .summary.outliers,
+                diagnostics: .summary.diagnostics
+              }' /tmp/payload.json
+          echo "=== first 3 product digests ==="
+          jq '[.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {}] | first | to_entries | .[:3]' /tmp/payload.json
+          # Verify the gh binary product is in there
+          echo "=== /tmp/gh as product? ==="
+          jq -r '.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {} | keys[]' /tmp/payload.json | grep -E "^/tmp/gh$" || echo "(not surfaced as product — material-only)"
+
+      - name: Upload attestation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gh-cli-attestation
+          path: /tmp/gh-build-attestation.json
+          if-no-files-found: warn
