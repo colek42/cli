@@ -76,17 +76,35 @@ jobs:
                 outliers: .summary.outliers,
                 diagnostics: .summary.diagnostics
               }' /tmp/payload.json
-          echo "=== product count + all products ==="
-          PRODS=$(jq -r '[.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {}] | first | length' /tmp/payload.json)
-          echo "products: $PRODS"
-          jq '[.predicate.attestations[]? | select(.type | test("product")) | .attestation.products // {}] | first | keys' /tmp/payload.json
-          # Assertion: with explicit products: bin/gh, expect ~1.
-          # Allow some slack (siblings on disk) but flag if 9000+.
-          if [ "${PRODS:-0}" -gt 100 ]; then
-            echo "::error::product over-classification: $PRODS — expected single-digit. The product attestor classified too many files as products; the include-glob isn't filtering correctly."
+          echo "=== product tree (v0.3 Merkle summary) ==="
+          # v0.3 product attestor publishes only the Merkle root + treeSize
+          # in the predicate (leaf paths are kept off-envelope to bound
+          # attestation size for builds with many outputs). The treeSize
+          # IS the product count.
+          PRODS=$(jq -r '[.predicate.attestations[]? | select(.type | test("product/v0\\.3")) | .attestation.treeSize] | first // 0' /tmp/payload.json)
+          MAT=$(jq -r '[.predicate.attestations[]? | select(.type | test("material/v0\\.3")) | .attestation.treeSize] | first // 0' /tmp/payload.json)
+          echo "products (Merkle leaves): $PRODS"
+          echo "materials (Merkle leaves): $MAT"
+          # Also expose summary totals for context — these are the
+          # trace's PRE-attestor classification, which can disagree
+          # with the final tree (exists-at-exit + dedup filter).
+          jq '.predicate.attestations[]? | select(.type | test("command-run")) | .attestation.summary.totals' /tmp/payload.json
+          # Assertion: with explicit products: bin/gh on a real Go
+          # build, expect at least 1 product in the tree and a
+          # non-trivial material count.
+          if [ "${PRODS:-0}" -lt 1 ]; then
+            echo "::error::no products in Merkle tree — bin/gh was either not classified as a product or was rejected by exists-at-exit. summary.totals above shows the trace's view."
             exit 1
           fi
-          echo "✓ product classification healthy ($PRODS products)"
+          if [ "${PRODS:-0}" -gt 100 ]; then
+            echo "::error::product over-classification: $PRODS — expected single-digit. include-glob isn't filtering."
+            exit 1
+          fi
+          if [ "${MAT:-0}" -lt 10 ]; then
+            echo "::error::material count suspiciously low ($MAT) — trace likely degraded"
+            exit 1
+          fi
+          echo "✓ product classification healthy (${PRODS} products, ${MAT} materials)"
 
       - name: Upload attestation
         if: always()
